@@ -242,4 +242,37 @@ app.get("/warmup", async (req, res) => {
     const browser = await getBrowser();
     const ctx = await (await browser).newContext();
     const p = await ctx.newPage();
-    await p.goto("https://example.com", { waitUntil: "domcontentloade
+    await p.goto("https://example.com", { waitUntil: "domcontentloaded", timeout: 30000 });
+    await p.close();
+    await ctx.close();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ---------- main endpoint ----------
+app.get("/fekB", async (req, res) => {
+  const date = (req.query.date || new Date(Date.now()-24*3600*1000).toISOString().slice(0,10)).trim();
+
+  try {
+    let list = await fetchListForDate(date);
+    // φίλτρο & όριο για μνήμη
+    list = list.filter(x => isIssueB(x.context) || isIssueB(x.title));
+    if (list.length > MAX_LIST) list = list.slice(0, MAX_LIST);
+
+    if (!list.length) return res.json({ date, count: 0, items: [] });
+
+    const items = await enrichItems(list);
+    return res.json({ date, count: items.length, items });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+// -------- process safety --------
+process.on("uncaughtException", err => console.error("uncaughtException", err));
+process.on("unhandledRejection", err => console.error("unhandledRejection", err));
+
+const port = process.env.PORT || 8080;
+app.listen(port, ()=> console.log("Listening on "+port));
