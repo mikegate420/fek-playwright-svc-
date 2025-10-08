@@ -25,6 +25,7 @@ async function getBrowser() {
 
 // health & warmup
 app.get("/", (req, res) => res.send("OK"));
+
 app.get("/warmup", async (req, res) => {
   try {
     const browser = await getBrowser();
@@ -37,14 +38,14 @@ app.get("/warmup", async (req, res) => {
   }
 });
 
-// -------------- helpers --------------
+// -------- helpers --------
 async function grabFekLinks(page) {
-  // περιμένουμε να σταθεροποιηθεί το network, κάνουμε scroll για lazy items
+  // περιμένουμε network idle και κάνουμε auto-scroll για lazy load
   await page.waitForLoadState("networkidle", { timeout: 60000 }).catch(()=>{});
   await page.evaluate(() => new Promise(resolve => {
     let h = 0, tries = 0;
     const t = setInterval(()=>{
-      window.scrollBy(0, 1000);
+      window.scrollBy(0, 1200);
       if (document.scrollingElement) {
         const nh = document.scrollingElement.scrollHeight;
         if (nh === h) tries++; else { h = nh; tries = 0; }
@@ -53,41 +54,39 @@ async function grabFekLinks(page) {
     }, 400);
   }));
 
-  // πιο χαλαρός selector
   const anchors = await page.$$('a[href*="fekId="]');
   const uniq = new Set();
   const out = [];
   for (const a of anchors) {
-    const href = await a.getAttribute("href");
-    if (!href) continue;
-    const absHref = new URL(href, page.url()).toString();
-    if (uniq.has(absHref)) continue;
-    uniq.add(absHref);
+    const hrefRel = await a.getAttribute("href");
+    if (!hrefRel) continue;
+    const href = new URL(hrefRel, page.url()).toString();
+    if (uniq.has(href)) continue;
+    uniq.add(href);
     const title = (await a.textContent() || "").trim();
-    const container = await a.evaluateHandle(el => el.closest(".search-result") || el.parentElement);
-    const context = (await container.evaluate(el => (el.innerText || "").replace(/\s+/g," ").trim()).catch(()=> "")) || "";
-    out.push({ href: absHref, title, context });
+    const containerHandle = await a.evaluateHandle(el => el.closest(".search-result") || el.parentElement || el);
+    const context = await containerHandle.evaluate(el => (el.innerText || "").replace(/\s+/g," ").trim()).catch(()=> "");
+    out.push({ href, title, context });
   }
   return out;
 }
 
 async function fetchListForDate(date) {
   const browser = await getBrowser();
-  const page = await (await browser).newPage({
-    userAgent: "Mozilla/5.0",
-    locale: "el-GR"
-  });
+  const page = await (await browser).newPage({ userAgent: "Mozilla/5.0", locale: "el-GR" });
 
   // 1) Daily Publications
   const dailyUrl = `https://search.et.gr/el/daily-publications/?datePublished=${date}`;
   await page.goto(dailyUrl, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(()=>{});
   let list = await grabFekLinks(page);
+
+  // 2) Fallback: Simple Search (ίδια ημερομηνία & τεύχος Β)
   if (list.length === 0) {
-    // 2) Fallback: Simple Search (server-side λίστα αλλά με JS UI)
     const simpleUrl = `https://search.et.gr/el/simple-search/?issue=B&release_from=${date}&release_to=${date}`;
     await page.goto(simpleUrl, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(()=>{});
     list = await grabFekLinks(page);
   }
+
   await page.close();
   return list;
 }
@@ -96,14 +95,14 @@ function isIssueB(text) {
   return /Τεύχος\s*Β\b|ΦΕΚ\s*Β\b|Issue\s*:?\s*B\b/i.test(text) || /\bΒ[’']?\b/.test(text);
 }
 
-// -------------- main endpoint --------------
+// ---------- main endpoint ----------
 app.get("/fekB", async (req, res) => {
   const date = (req.query.date || new Date(Date.now()-24*3600*1000).toISOString().slice(0,10)).trim();
+
   try {
     const list = await fetchListForDate(date);
     if (!list.length) return res.json({ date, count: 0, items: [] });
 
-    // κρατάμε μόνο όσα φαίνονται Β σε επίπεδο λίστας (θα το επιβεβαιώσουμε και στη σελίδα)
     const pre = list.filter(x => isIssueB(x.context) || isIssueB(x.title));
 
     const browser = await getBrowser();
@@ -116,7 +115,7 @@ app.get("/fekB", async (req, res) => {
 
         const pageTitle = await p.title().catch(()=> "");
         let firstP = "";
-        try { firstP = await p.$eval("p", el => el.innerText); } catch(_){}
+        try { firstP = await p.$eval("p", el => el.innerText); } catch(_) {}
         const bodyText = (await p.textContent("body").catch(()=> "")) || "";
 
         const issue = (bodyText.match(/Τεύχος\s*:?\s*([Α-ΩA-Z])/i)||[])[1] || "Β";
@@ -135,9 +134,9 @@ app.get("/fekB", async (req, res) => {
       } catch(_) {}
     }
 
-    return res.json({ date, count: results.length, items: results });
+    res.json({ date, count: results.length, items: results });
   } catch (e) {
-    return res.status(500).json({ error: String(e) });
+    res.status(500).json({ error: String(e) });
   }
 });
 
