@@ -23,24 +23,13 @@ async function getBrowser() {
   return browserPromise;
 }
 
-// health & warmup
-app.get("/", (req, res) => res.send("OK"));
+// ---------- helpers ----------
+function isIssueB(text) {
+  return /Τεύχος\s*Β\b|ΦΕΚ\s*Β\b|Issue\s*:?\s*B\b/i.test(text || "") || /\bΒ[’']?\b/.test(text || "");
+}
 
-app.get("/warmup", async (req, res) => {
-  try {
-    const browser = await getBrowser();
-    const p = await (await browser).newPage();
-    await p.goto("https://example.com", { waitUntil: "domcontentloaded", timeout: 30000 });
-    await p.close();
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-// -------- helpers --------
 async function grabFekLinks(page) {
-  // περιμένουμε network idle και κάνουμε auto-scroll για lazy load
+  // περίμενε να σταθεροποιηθεί το network και κάνε auto-scroll (lazy load)
   await page.waitForLoadState("networkidle", { timeout: 60000 }).catch(()=>{});
   await page.evaluate(() => new Promise(resolve => {
     let h = 0, tries = 0;
@@ -54,6 +43,7 @@ async function grabFekLinks(page) {
     }, 400);
   }));
 
+  // χαλαρός selector για αποτελέσματα
   const anchors = await page.$$('a[href*="fekId="]');
   const uniq = new Set();
   const out = [];
@@ -75,25 +65,92 @@ async function fetchListForDate(date) {
   const browser = await getBrowser();
   const page = await (await browser).newPage({ userAgent: "Mozilla/5.0", locale: "el-GR" });
 
-  // 1) Daily Publications
-  const dailyUrl = `https://search.et.gr/el/daily-publications/?datePublished=${date}`;
+  // ---- (A) Daily Publications ----
+  const dailyUrl = `https://search.et.gr/el/daily-publications/`;
   await page.goto(dailyUrl, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(()=>{});
-  let list = await grabFekLinks(page);
 
-  // 2) Fallback: Simple Search (ίδια ημερομηνία & τεύχος Β)
-  if (list.length === 0) {
-    const simpleUrl = `https://search.et.gr/el/simple-search/?issue=B&release_from=${date}&release_to=${date}`;
-    await page.goto(simpleUrl, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(()=>{});
-    list = await grabFekLinks(page);
+  // Συμπλήρωσε ημερομηνία και πάτα "Αναζήτηση"
+  try {
+    const dateInput = await page.$('input[name="datePublished"], #datePublished').catch(()=>null);
+    if (dateInput) {
+      await dateInput.fill(date);
+    } else {
+      await page.evaluate((d) => {
+        const el = document.querySelector('input[name="datePublished"], #datePublished');
+        if (el) { el.value = d; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }
+      }, date);
+    }
+
+    const searchBtn = await page.$('button:has-text("Αναζήτηση"), input[type="submit"], button[type="submit"]').catch(()=>null);
+    if (searchBtn) {
+      await Promise.all([
+        searchBtn.click(),
+        page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(()=>{})
+      ]);
+    } else {
+      await page.evaluate(() => { const f = document.querySelector("form"); if (f) f.submit(); });
+      await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(()=>{});
+    }
+
+    let list = await grabFekLinks(page);
+    if (list.length) { await page.close(); return list; }
+  } catch (_) { /* fallback */ }
+
+  // ---- (B) Fallback: Simple Search (issue=B & release_from/to) ----
+  await page.goto("https://search.et.gr/el/simple-search/", { waitUntil: "domcontentloaded", timeout: 90000 }).catch(()=>{});
+  try {
+    // issue = B
+    await page.selectOption('select[name="issue"]', 'B').catch(async () => {
+      await page.evaluate(() => { const s = document.querySelector('select[name="issue"]'); if (s) s.value = 'B'; });
+    });
+    // release_from / release_to
+    const selFrom = await page.$('input[name="release_from"], #release_from').catch(()=>null);
+    const selTo   = await page.$('input[name="release_to"], #release_to').catch(()=>null);
+    if (selFrom) await selFrom.fill(date); else {
+      await page.evaluate((d) => {
+        const el = document.querySelector('input[name="release_from"], #release_from'); if (el) { el.value = d; el.dispatchEvent(new Event('change', {bubbles:true})); }
+      }, date);
+    }
+    if (selTo) await selTo.fill(date); else {
+      await page.evaluate((d) => {
+        const el = document.querySelector('input[name="release_to"], #release_to'); if (el) { el.value = d; el.dispatchEvent(new Event('change', {bubbles:true})); }
+      }, date);
+    }
+
+    const searchBtn2 = await page.$('button:has-text("Αναζήτηση"), input[type="submit"], button[type="submit"]').catch(()=>null);
+    if (searchBtn2) {
+      await Promise.all([
+        searchBtn2.click(),
+        page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(()=>{})
+      ]);
+    } else {
+      await page.evaluate(() => { const f = document.querySelector("form"); if (f) f.submit(); });
+      await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(()=>{});
+    }
+
+    const list2 = await grabFekLinks(page);
+    await page.close();
+    return list2;
+  } catch (e) {
+    await page.close();
+    return [];
   }
-
-  await page.close();
-  return list;
 }
 
-function isIssueB(text) {
-  return /Τεύχος\s*Β\b|ΦΕΚ\s*Β\b|Issue\s*:?\s*B\b/i.test(text) || /\bΒ[’']?\b/.test(text);
-}
+// ---------- health & warmup ----------
+app.get("/", (req, res) => res.send("OK"));
+
+app.get("/warmup", async (req, res) => {
+  try {
+    const browser = await getBrowser();
+    const p = await (await browser).newPage();
+    await p.goto("https://example.com", { waitUntil: "domcontentloaded", timeout: 30000 });
+    await p.close();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
 
 // ---------- main endpoint ----------
 app.get("/fekB", async (req, res) => {
